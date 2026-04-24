@@ -1,13 +1,13 @@
 {
   "name": "gettic-bot",
   "version": "1.0.0",
-  "description": "Gettic Bot Uygulaması",
+  "description": "Gettic Bot - HTTP Panelli",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
   "dependencies": {
-    "socket.io-client": "^4.7.2",
-    "axios": "^1.6.0"
+    "gettic.js": "^1.0.0"
   }
 }
