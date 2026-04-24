@@ -179,7 +179,9 @@ MIT © darking053
 ## 🔗 Bağlantılar
 
 · [`Gettic Platform`](https://gettic.onrender.com)
+
 · [`Gettic.js npmjs`](https://www.npmjs.com/package/gettic.js)
+
 · [`GitHub`](https://github.com/darking053official/gettic)
 
 ---
