@@ -17,9 +17,9 @@ npm install
 
 ### 2. Token Al
 
-1. gettic.onrender.com [`Git`](https://gettic.onrender.com) adresine git
+1. https://gettic.onrender.com adresine git
 
-2. Giriş yap
+2. Giriş yap veya Kayıt ol
 
 3. Üst menüden Bot sekmesine tıkla
 
