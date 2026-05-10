@@ -652,7 +652,7 @@ client.on("messageCreate", async (message) => {
     message.reply(`✅ Hoşgeldin kanalı ayarlandı!`);
     return;
   }
- }
+ 
 }); // messageCreate biter
 
 // Hata Yakalama
