@@ -171,7 +171,7 @@ client.on("messageCreate", async (message) => {
       .setTitle("🛡️ MODDUX Moderasyon")
       .setColor(Colors.Red)
       .addFields(
-        { name: "🔨 Ban", value: "`!ban @üye [sebep]` `!toplu-ban @üye1 @üye2` `!unban <ID>` `!banlist`", inline: false },
+        { name: "🔨 Ban", value: "`!ban @üye [sebep]` `!banlist`", inline: false },
         { name: "👢 Kick", value: "`!kick @üye`", inline: false },
         { name: "🔇 Susturma", value: "`!sustur @üye [dk]` `!susturma-kaldir @üye`", inline: false },
         { name: "⚠️ Uyarı", value: "`!uyar @üye [sebep]` `!uyarilar @üye` `!uyari-sil @üye`", inline: false },
@@ -184,7 +184,7 @@ client.on("messageCreate", async (message) => {
         { name: "👋 Karşılama", value: "`!hosgeldin <ID>` `!hosgeldin kapat`", inline: false },
         { name: "📊 Bilgi", value: "`!sunucu` `!kullanici @üye` `!ping`", inline: false }
       )
-      .setFooter({ text: "MODDUX | JSON DB | Prefix: !" });
+      .setFooter({ text: "MODDUX | Prefix: !" });
     return message.reply({ embeds: [embed] });
   }
 
