@@ -649,7 +649,7 @@ if (cmd === "spam-gif") {
     message.reply(`✅ Hoşgeldin kanalı ayarlandı!`);
     return;
   }
-
+ }
 }); // messageCreate biter
 
 // Hata Yakalama
