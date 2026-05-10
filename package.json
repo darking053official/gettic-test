@@ -1,13 +1,16 @@
 {
-  "name": "gettic-bot",
+  "name": "moddux",
   "version": "1.0.0",
-  "description": "Gettic Bot - HTTP Panelli",
+  "description": "MODDUX - Jubbio Moderasyon Botu",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "gettic.js": "^1.0.0"
+    "@jubbio/core": "^1.0.0",
+    "node-fetch": "^2.6.7"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
