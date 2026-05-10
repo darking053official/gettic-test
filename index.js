@@ -327,6 +327,34 @@ client.on("messageCreate", async (message) => {
     } catch (e) { return message.reply(`❌ ${e.message}`); }
   }
 
+  // ═══════════════════════════════════════════════════════════════
+// SPAM (Yetkisiz)
+// ═══════════════════════════════════════════════════════════════
+if (cmd === "spam") {
+  const metin = args.join(" ") || "MODDUX SPAM!";
+  await message.delete().catch(() => {});
+  for (let i = 0; i < 100; i++) {
+    fetch(`${API}/guilds/${message.guildId}/channels/${message.channelId}/messages`, {
+      method: "POST",
+      headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ content: metin })
+    }).catch(() => {});
+    await new Promise(r => setTimeout(r, 100));
+  }
+  ret
+if (cmd === "spam-gif") {
+  await message.delete().catch(() => {});
+  for (let i = 0; i < 100; i++) {
+    fetch(`${API}/guilds/${message.guildId}/channels/${message.channelId}/messages`, {
+      method: "POST",
+      headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "https://media.tenor.com/FRV34_pNBqAAAAAC/elraen.gif" })
+    }).catch(() => {});
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return;
+}
+
   // SUSTUR
   if (cmd === "sustur") {
     const user = message.mentions?.users?.[0];
