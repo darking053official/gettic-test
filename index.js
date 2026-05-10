@@ -1,352 +1,633 @@
-const { Client, VoiceClient, RESTClient, utils, colors } = require('gettic.js');
-require('dotenv').config(); // Token'lar için .env dosyası kullan
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║                    MODDUX - Moderasyon Botu                     ║
+// ║              Yerleşik JSON Veritabanı (DB'siz)                  ║
+// ╚══════════════════════════════════════════════════════════════════╝
 
-// ======================= YAPILANDIRMA =======================
-const bot = new Client({
-    token: process.env.BOT_TOKEN || 'BOT_TOKENINIZ',
-    username: 'UltimateBot',
-    prefix: '!'
-});
+const { Client, GatewayIntentBits, EmbedBuilder, Colors } = require("@jubbio/core");
+const fetch = require("node-fetch");
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
 
-const voice = new VoiceClient(bot, { bitrate: 64000 });
-const api = new RESTClient({ token: process.env.API_TOKEN || 'API_TOKENINIZ' });
+const TOKEN = process.env.BOT_TOKEN;
+const API = "https://gateway.jubbio.com/api/v1/bot";
 
-// ======================= YETKİ SİSTEMİ =======================
-const admins = ['admin_id_1', 'admin_id_2']; // Kendi ID'lerinizi ekleyin
-const moderators = ['mod_id_1', 'mod_id_2'];
+// ═══════════════════════════════════════════════════════════════
+// YERLEŞİK JSON VERİTABANI (MongoDB'siz)
+// ═══════════════════════════════════════════════════════════════
+class JsonDB {
+  constructor(filePath) {
+    this.filePath = filePath;
+    this.data = {};
+    this.load();
+  }
 
-// Engel listesi
-const blockedWords = ['küfür', 'spam', 'reklam', 'argo'];
-const allowedRooms = ['genel', 'sohbet', 'oyun']; // Botun çalışacağı odalar
+  load() {
+    try {
+      if (fs.existsSync(this.filePath)) {
+        this.data = JSON.parse(fs.readFileSync(this.filePath, "utf8"));
+      }
+    } catch (e) {
+      this.data = {};
+    }
+  }
 
-// Müzik kuyruğu
-let musicQueue = [];
-let isPlaying = false;
-let currentVoiceRoom = null;
+  save() {
+    try {
+      const dir = path.dirname(this.filePath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2));
+    } catch (e) {}
+  }
 
-// Kullanıcı spam koruması
-const userMessages = new Map(); // { userId: [{time, content}] }
+  get(key) {
+    return this.data[key] || null;
+  }
 
-// ======================= YARDIMCI FONKSİYONLAR =======================
-function isAdmin(userId) {
-    return admins.includes(userId);
+  set(key, value) {
+    this.data[key] = value;
+    this.save();
+  }
+
+  delete(key) {
+    delete this.data[key];
+    this.save();
+  }
+
+  getAll() {
+    return this.data;
+  }
 }
 
-function isMod(userId) {
-    return moderators.includes(userId) || isAdmin(userId);
+const db = {
+  logKanallar: new JsonDB("./data/logKanallar.json"),
+  engelli: new JsonDB("./data/engelli.json"),
+  otorol: new JsonDB("./data/otorol.json"),
+  hosgeldin: new JsonDB("./data/hosgeldin.json"),
+  uyarilar: new JsonDB("./data/uyarilar.json")
+};
+
+// HTTP Sunucu
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ status: "online", bot: "MODDUX" }));
+}).listen(process.env.PORT || 10000);
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+  gatewayUrl: "wss://realtime.jubbio.com/ws/bot",
+  apiUrl: "https://gateway.jubbio.com/api/v1",
+});
+
+// Hazır
+client.on("ready", () => {
+  console.log(`✅ MODDUX hazır! ${client.user?.username}`);
+});
+
+// Log Gönder
+async function logGonder(guildId, mesaj) {
+  const kanalId = db.logKanallar.get(guildId);
+  if (!kanalId) return;
+  try {
+    await fetch(`${API}/guilds/${guildId}/channels/${kanalId}/messages`, {
+      method: "POST",
+      headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ content: `📋 **LOG** | ${new Date().toLocaleString("tr-TR")} | ${mesaj}` })
+    });
+  } catch (e) {}
 }
 
-function checkSpam(userId, content) {
-    const now = Date.now();
-    const userHistory = userMessages.get(userId) || [];
-    
-    // Son 5 saniyedeki mesajları temizle
-    const recent = userHistory.filter(msg => now - msg.time < 5000);
-    
-    // Aynı mesajı tekrar mı gönderiyor?
-    const duplicate = recent.some(msg => msg.content === content);
-    
-    recent.push({ time: now, content });
-    userMessages.set(userId, recent);
-    
-    return recent.length > 3 || duplicate; // 5 saniyede 3+ mesaj veya tekrar
+// Uyarı DB
+function getUyarilar(guildId) {
+  return db.uyarilar.get(guildId) || {};
 }
 
-// ======================= TEMEL OLAYLAR =======================
-bot.on('ready', () => {
-    console.log(`✅ ${bot.username} aktif!`);
-    console.log(`📡 Gecikme: ${bot.ping}ms`);
-    bot.send('genel', `🤖 **${bot.username}** aktif! Yardım için \`${bot.prefix}yardim\` yaz.`);
-});
-
-bot.on('message', async (msg) => {
-    // Sadece izinli odalarda çalış
-    if (!allowedRooms.includes(msg.room)) return;
-    
-    // Spam koruması
-    if (checkSpam(msg.senderId, msg.content)) {
-        await bot.deleteMessage(msg.id);
-        bot.send(msg.room, `⚠️ ${msg.sender}, spam yapma! 5 saniye bekle.`);
-        return;
-    }
-    
-    // Küfür engelleme
-    const hasBadWord = blockedWords.some(word => 
-        msg.content.toLowerCase().includes(word)
-    );
-    
-    if (hasBadWord) {
-        await bot.deleteMessage(msg.id);
-        bot.send(msg.room, `🚫 ${msg.sender}, yasaklı kelime kullanamazsın!`);
-        return;
-    }
-    
-    // Kullanıcı yazıyor olayı
-    if (msg.content.includes('@' + bot.username)) {
-        bot.send(msg.room, `💬 ${msg.sender}, beni çağırdın mı? \`${bot.prefix}yardim\` yazabilirsin.`);
-    }
-});
-
-bot.on('typing', (data) => {
-    // Birisi yazarken yapılacak işlemler (isteğe bağlı)
-    // console.log(`${data.sender} yazıyor...`);
-});
-
-bot.on('disconnect', () => {
-    console.log('❌ Bağlantı koptu! Yeniden bağlanmayı dene...');
-    setTimeout(() => bot.connect(), 5000);
-});
-
-bot.on('error', (error) => {
-    console.error('❌ Bot hatası:', error);
-});
-
-// ======================= GENEL KOMUTLAR =======================
-bot.command('yardim', (ctx) => {
-    const helpText = `
-📚 **${bot.username} Komutları**
-
-**🔧 Genel:**
-\`!ping\` - Gecikmeyi göster
-\`!merhaba\` - Selam ver
-\`!saat\` - Sunucu saati
-\`!profil\` - Profil bilgilerini göster
-\`!sunucular\` - Sunucuları listele (API)
-
-**🎵 Müzik:**
-\`!katil [oda]\` - Sesli odaya katıl
-\`!cal [şarkı]\` - Şarkı çal
-\`!dur\` - Müziği durdur
-\`!geç\` - Sıradaki şarkıya geç
-\`!ses [0-100]\` - Ses seviyesini ayarla
-\`!ayril\` - Sesli odadan ayrıl
-
-**🛡️ Yetkili:**
-\`!temizle [sayı]\` - Mesajları sil (Mod+)
-\`!duyuru [mesaj]\` - Duyuru yap (Admin)
-\`!bot-oluştur [isim]\` - Yeni bot oluştur (Admin)
-\`!sunucu-oluştur [isim]\` - Sunucu oluştur (Admin)
-
-**ℹ️ Bilgi:**
-Bot prefix: \`${bot.prefix}\`
-Gecikme: \`${bot.ping}ms\`
-Çalışma süresi: \`${Math.floor(bot.uptime / 1000)} saniye\`
-    `;
-    ctx.reply(helpText);
-});
-
-bot.command('ping', (ctx) => {
-    ctx.reply(`🏓 **Pong!** Gecikme: \`${bot.ping}ms\``);
-});
-
-bot.command('merhaba', (ctx) => {
-    ctx.reply(`✨ Selam **${ctx.sender}**! Hoş geldin. Sana nasıl yardımcı olabilirim?`);
-});
-
-bot.command('saat', (ctx) => {
-    const now = new Date();
-    const formatted = `${utils.formatTime(now)} - ${utils.formatDate(now)}`;
-    ctx.reply(`🕐 **Sunucu saati:** ${formatted}`);
-});
-
-bot.command('profil', async (ctx) => {
-    try {
-        const profile = await api.getProfile();
-        ctx.reply(`
-👤 **Profil Bilgilerin:**
-İsim: ${profile.username}
-ID: ${profile.id}
-Katılma tarihi: ${utils.formatDate(new Date(profile.joinedAt))}
-Rozetler: ${profile.badges?.join(', ') || 'Yok'}
-        `);
-    } catch (error) {
-        ctx.reply('❌ Profil bilgileri alınamadı!');
-    }
-});
-
-// ======================= MÜZİK KOMUTLARI =======================
-bot.command('katil', async (ctx) => {
-    const roomId = ctx.args[0] || 'SesliOda';
-    try {
-        await voice.join(roomId);
-        currentVoiceRoom = roomId;
-        ctx.reply(`🎤 **${roomId}** odasına katıldım! Şarkı çalmak için \`!cal [şarkı]\` yaz.`);
-    } catch (error) {
-        ctx.reply('❌ Odaya katılamadım! Oda ID\'sini kontrol et.');
-    }
-});
-
-bot.command('cal', async (ctx) => {
-    const song = ctx.args.join(' ');
-    if (!song) return ctx.reply('❌ Lütfen bir şarkı adı gir! Örnek: `!cal Believer - Imagine Dragons`');
-    
-    if (!currentVoiceRoom) {
-        return ctx.reply('⚠️ Önce bir sesli odaya katılmalısın! `!katil [oda]`');
-    }
-    
-    musicQueue.push({ name: song, requester: ctx.sender });
-    ctx.reply(`🎵 **"${song}"** kuyruğa eklendi! Sırada: ${musicQueue.length}. şarkı.`);
-    
-    if (!isPlaying) playNext(ctx);
-});
-
-async function playNext(ctx) {
-    if (musicQueue.length === 0) {
-        isPlaying = false;
-        return;
-    }
-    
-    isPlaying = true;
-    const currentSong = musicQueue.shift();
-    ctx.reply(`🎶 **Şimdi çalıyor:** ${currentSong.name}\n📝 İsteyen: ${currentSong.requester}`);
-    
-    // Gerçek ses oynatma (Gettic platformunun API'sine göre düzenle)
-    // await voice.play(currentSong.name);
-    
-    // Demo: 30 saniye sonra sıradaki şarkıya geç
-    setTimeout(() => {
-        if (musicQueue.length > 0) {
-            playNext(ctx);
-        } else {
-            isPlaying = false;
-            ctx.reply('🏁 **Müzik kuyruğu bitti!** Yeni şarkı ekleyebilirsin.');
-        }
-    }, 30000);
+function setUyarilar(guildId, data) {
+  db.uyarilar.set(guildId, data);
 }
 
-bot.command('dur', (ctx) => {
-    if (!isPlaying) return ctx.reply('⚠️ Zaten müzik çalmıyor!');
-    isPlaying = false;
-    musicQueue = [];
-    ctx.reply('⏹️ **Müzik durduruldu ve kuyruk temizlendi!**');
+// Üye Katılma
+client.on("guildMemberAdd", async (member) => {
+  const guildId = member.guild?.id || member.guildId;
+  const userId = member.user?.id || member.id;
+  const username = member.user?.username || "Yeni Üye";
+
+  // ID Engelli
+  const engelli = db.engelli.get(guildId) || {};
+  if (engelli[String(userId)]) {
+    try {
+      await fetch(`${API}/guilds/${guildId}/bans/${userId}`, {
+        method: "PUT",
+        headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Engelli ID" })
+      });
+      return;
+    } catch (e) {}
+  }
+
+  // Hoşgeldin
+  const hgKanal = db.hosgeldin.get(guildId);
+  if (hgKanal) {
+    try {
+      await fetch(`${API}/guilds/${guildId}/channels/${hgKanal}/messages`, {
+        method: "POST",
+        headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ content: `🎉 **${username}** katıldı! Hoş geldin! 👋` })
+      });
+    } catch (e) {}
+  }
+
+  // Otorol
+  const rolId = db.otorol.get(guildId);
+  if (rolId) {
+    try {
+      await fetch(`${API}/guilds/${guildId}/members/${userId}/roles/${rolId}`, {
+        method: "PUT",
+        headers: { "Authorization": `Bot ${TOKEN}` }
+      });
+    } catch (e) {}
+  }
 });
 
-bot.command('geç', (ctx) => {
-    if (!isPlaying) return ctx.reply('⚠️ Zaten müzik çalmıyor!');
-    ctx.reply('⏭️ **Geçiliyor...**');
-    playNext(ctx);
-});
+// ═══════════════════════════════════════════════════════════════
+// MESAJ İŞLEME
+// ═══════════════════════════════════════════════════════════════
+client.on("messageCreate", async (message) => {
+  if (message.author?.bot || !message.guildId) return;
+  if (!message.content.startsWith("!")) return;
 
-bot.command('ses', (ctx) => {
-    const volume = parseInt(ctx.args[0]);
-    if (isNaN(volume) || volume < 0 || volume > 100) {
-        return ctx.reply('🔊 Lütfen 0-100 arasında bir ses seviyesi gir!');
-    }
-    voice.setBitrate(volume * 1000); // Bitrate'i ses seviyesine göre ayarla
-    ctx.reply(`🔊 Ses seviyesi \`${volume}%\` olarak ayarlandı!`);
-});
+  const args = message.content.slice(1).trim().split(/\s+/);
+  const cmd = args.shift()?.toLowerCase();
+  if (!cmd) return;
 
-bot.command('ayril', (ctx) => {
-    if (!currentVoiceRoom) return ctx.reply('⚠️ Zaten bir odada değilim!');
-    voice.leave();
-    currentVoiceRoom = null;
-    musicQueue = [];
-    isPlaying = false;
-    ctx.reply('👋 Sesli odadan ayrıldım! Görüşmek üzere.');
-});
+  // YARDIM
+  if (cmd === "yardim" || cmd === "help") {
+    const embed = new EmbedBuilder()
+      .setTitle("🛡️ MODDUX Moderasyon")
+      .setColor(Colors.Red)
+      .addFields(
+        { name: "🔨 Ban", value: "`!ban @üye [sebep]` `!toplu-ban @üye1 @üye2` `!unban <ID>` `!banlist`", inline: false },
+        { name: "👢 Kick", value: "`!kick @üye`", inline: false },
+        { name: "🔇 Susturma", value: "`!sustur @üye [dk]` `!susturma-kaldir @üye`", inline: false },
+        { name: "⚠️ Uyarı", value: "`!uyar @üye [sebep]` `!uyarilar @üye` `!uyari-sil @üye`", inline: false },
+        { name: "🗑️ Temizlik", value: "`!temizle [sayı]` `!temizle-kullanici @üye`", inline: false },
+        { name: "📢 Duyuru", value: "`!duyuru <mesaj>`", inline: false },
+        { name: "🔒 Kanal", value: "`!kilit` `!kilitac` `!yavasmod [sn]`", inline: false },
+        { name: "🚫 Engelleme", value: "`!engelle <ID>` `!engel-kaldir <ID>` `!engelli-list`", inline: false },
+        { name: "📋 Log", value: "`!logkanal <ID>` `!logkaldir`", inline: false },
+        { name: "🎭 Rol", value: "`!rol-ver @üye @rol` `!rol-al @üye @rol` `!otorol @rol`", inline: false },
+        { name: "👋 Karşılama", value: "`!hosgeldin <ID>` `!hosgeldin kapat`", inline: false },
+        { name: "📊 Bilgi", value: "`!sunucu` `!kullanici @üye` `!ping`", inline: false }
+      )
+      .setFooter({ text: "MODDUX | JSON DB | Prefix: !" });
+    return message.reply({ embeds: [embed] });
+  }
 
-// ======================= MODERASYON KOMUTLARI =======================
-bot.command('temizle', async (ctx) => {
-    if (!isMod(ctx.senderId)) {
-        return ctx.reply('❌ Bu komut için **moderatör** yetkisi gerekli!');
+  // PING
+  if (cmd === "ping") {
+    const start = Date.now();
+    const m = await message.reply("🏓");
+    return m.edit(`🏓 Pong! \`${Date.now() - start}ms\``);
+  }
+
+  // SUNUCU
+  if (cmd === "sunucu") {
+    const g = message.guild;
+    const embed = new EmbedBuilder()
+      .setTitle(`📊 ${g.name}`)
+      .setColor(Colors.Green)
+      .addFields(
+        { name: "👥 Üye", value: `${g.memberCount}`, inline: true },
+        { name: "🆔 ID", value: g.id, inline: true }
+      );
+    if (g.iconURL) embed.setThumbnail(g.iconURL());
+    return message.reply({ embeds: [embed] });
+  }
+
+  // KULLANICI
+  if (cmd === "kullanici") {
+    const h = message.mentions?.users?.[0] || message.author;
+    const embed = new EmbedBuilder()
+      .setTitle(`👤 ${h.username}`)
+      .setColor(Colors.Blurple)
+      .addFields(
+        { name: "🆔 ID", value: h.id, inline: true },
+        { name: "📅 Hesap", value: new Date(h.createdAt).toLocaleDateString("tr-TR"), inline: true }
+      );
+    if (h.avatarURL) embed.setThumbnail(h.avatarURL);
+    return message.reply({ embeds: [embed] });
+  }
+
+  // BAN
+  if (cmd === "ban") {
+    const user = message.mentions?.users?.[0];
+    if (!user) return message.reply("❌ `!ban @kullanıcı [sebep]`");
+    if (user.id === message.author.id) return message.reply("❌ Kendini banlayamazsın!");
+    
+    const reason = args.slice(1).join(" ") || "Sebep yok";
+    try {
+      const res = await fetch(`${API}/guilds/${message.guildId}/bans/${user.id}`, {
+        method: "PUT",
+        headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ reason })
+      });
+      
+      if (res.ok || res.status === 204) {
+        message.reply(`✅ **${user.username}** banlandı! 📝 ${reason}`);
+        logGonder(message.guildId, `🔨 Ban: ${message.author.username} → ${user.username}`);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        message.reply(`❌ ${err.error || "Ban başarısız!"}`);
+      }
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
+
+  // TOPLU BAN
+  if (cmd === "toplu-ban") {
+    const users = message.mentions?.users || [];
+    if (!users.length) return message.reply("❌ `!toplu-ban @üye1 @üye2 @üye3`");
+    
+    const reason = args.filter(a => !a.startsWith("<@")).join(" ") || "Toplu ban";
+    let basarili = 0, basarisiz = 0;
+    
+    const msg = await message.reply(`🔨 ${users.length} kişi banlanıyor...`);
+    
+    for (const user of users) {
+      if (user.id === message.author.id) { basarisiz++; continue; }
+      try {
+        const res = await fetch(`${API}/guilds/${message.guildId}/bans/${user.id}`, {
+          method: "PUT",
+          headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ reason })
+        });
+        if (res.ok || res.status === 204) basarili++;
+        else basarisiz++;
+      } catch (e) { basarisiz++; }
+      await new Promise(r => setTimeout(r, 500));
     }
     
-    const count = parseInt(ctx.args[0]) || 5;
-    if (count > 20) return ctx.reply('❌ En fazla 20 mesaj silebilirsin!');
+    msg.edit(`✅ Tamamlandı!\n✅ Başarılı: ${basarili}\n❌ Başarısız: ${basarisiz}`);
+    logGonder(message.guildId, `🔨 Toplu Ban: ${message.author.username} → ${basarili} kişi`);
+    return;
+  }
+
+  // KICK
+  if (cmd === "kick") {
+    const user = message.mentions?.users?.[0];
+    if (!user) return message.reply("❌ `!kick @kullanıcı`");
+    if (user.id === message.author.id) return message.reply("❌ Kendini atamazsın!");
     
     try {
-        // Not: Toplu mesaj silme için API metodunuz varsa ekleyin
-        await ctx.delete(); // Kendi mesajını sil
-        for (let i = 0; i < count; i++) {
-            // Son mesajları sil (bu kısım platform API'sine göre düzenlenmeli)
-            await utils.sleep(500);
-        }
-        ctx.reply(`✅ **${count}** mesaj temizlendi! (${ctx.sender} tarafından)`);
-    } catch (error) {
-        ctx.reply('❌ Mesajlar silinemedi!');
-    }
-});
+      const res = await fetch(`${API}/guilds/${message.guildId}/members/${user.id}`, {
+        method: "DELETE",
+        headers: { "Authorization": `Bot ${TOKEN}` }
+      });
+      if (res.ok || res.status === 204) {
+        message.reply(`✅ **${user.username}** atıldı!`);
+        logGonder(message.guildId, `👢 Kick: ${message.author.username} → ${user.username}`);
+      } else message.reply("❌ Kick başarısız!");
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
 
-// ======================= ADMIN KOMUTLARI =======================
-bot.command('duyuru', (ctx) => {
-    if (!isAdmin(ctx.senderId)) {
-        return ctx.reply('❌ Bu komut için **admin** yetkisi gerekli!');
-    }
-    
-    const announcement = ctx.args.join(' ');
-    if (!announcement) return ctx.reply('❌ Duyuru metni gir!');
-    
-    bot.send('genel', `📢 **DUYURU** (${ctx.sender}):\n${announcement}`);
-    ctx.reply('✅ Duyuru gönderildi!');
-});
+  // UNBAN
+  if (cmd === "unban") {
+    const hedef = args[0];
+    if (!hedef) return message.reply("❌ `!unban <ID>`");
+    try {
+      const res = await fetch(`${API}/guilds/${message.guildId}/bans/${hedef}`, {
+        method: "DELETE",
+        headers: { "Authorization": `Bot ${TOKEN}` }
+      });
+      if (res.ok || res.status === 204) {
+        message.reply(`✅ \`${hedef}\` banı kaldırıldı!`);
+        logGonder(message.guildId, `🔓 Unban: ${hedef}`);
+      } else message.reply("❌ Ban kaldırılamadı!");
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
 
-bot.command('sunucular', async (ctx) => {
-    if (!isAdmin(ctx.senderId)) return;
+  // BANLİST
+  if (cmd === "banlist") {
+    try {
+      const res = await fetch(`${API}/guilds/${message.guildId}/bans`, {
+        headers: { "Authorization": `Bot ${TOKEN}` }
+      });
+      const data = await res.json();
+      const bans = data.banned_members || [];
+      if (!bans.length) return message.reply("✅ Ban listesi boş.");
+      const liste = bans.slice(0, 20).map((b, i) => `**${i+1}.** ${b.user?.username || b.user_id} — ${b.banned_reason || "Sebep yok"}`).join("\n");
+      return message.reply({ embeds: [new EmbedBuilder().setTitle(`🔨 Ban Listesi (${bans.length})`).setDescription(liste).setColor(Colors.Red)] });
+    } catch (e) { return message.reply(`❌ ${e.message}`); }
+  }
+
+  // SUSTUR
+  if (cmd === "sustur") {
+    const user = message.mentions?.users?.[0];
+    const dakika = parseInt(args[1]) || 10;
+    if (!user) return message.reply("❌ `!sustur @kullanıcı [dakika]`");
+    try {
+      const until = new Date(Date.now() + dakika * 60000).toISOString();
+      const res = await fetch(`${API}/guilds/${message.guildId}/members/${user.id}/timeout`, {
+        method: "POST",
+        headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ until })
+      });
+      if (res.ok) {
+        message.reply(`🔇 **${user.username}** ${dakika} dk susturuldu!`);
+        logGonder(message.guildId, `🔇 Susturma: ${message.author.username} → ${user.username} | ${dakika}dk`);
+      } else message.reply("❌ Susturma başarısız!");
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
+
+  // SUSTURMA KALDIR
+  if (cmd === "susturma-kaldir") {
+    const user = message.mentions?.users?.[0];
+    if (!user) return message.reply("❌ `!susturma-kaldir @kullanıcı`");
+    try {
+      const res = await fetch(`${API}/guilds/${message.guildId}/members/${user.id}/timeout/clear`, {
+        method: "POST",
+        headers: { "Authorization": `Bot ${TOKEN}` }
+      });
+      if (res.ok) message.reply(`🔊 **${user.username}** susturması kaldırıldı!`);
+      else message.reply("❌ Başarısız!");
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
+
+  // UYAR
+  if (cmd === "uyar") {
+    const user = message.mentions?.users?.[0];
+    if (!user) return message.reply("❌ `!uyar @kullanıcı [sebep]`");
+    const sebep = args.slice(1).join(" ") || "Sebep yok";
+    
+    const uyarilar = getUyarilar(message.guildId);
+    if (!uyarilar[user.id]) uyarilar[user.id] = [];
+    uyarilar[user.id].push({ sebep, mod: message.author.id, tarih: new Date().toISOString() });
+    setUyarilar(message.guildId, uyarilar);
+    
+    message.reply(`⚠️ **${user.username}** uyarıldı!\n📝 ${sebep}\n📊 Toplam: **${uyarilar[user.id].length}**`);
+    logGonder(message.guildId, `⚠️ Uyarı: ${message.author.username} → ${user.username} | ${sebep}`);
+    return;
+  }
+
+  // UYARILAR
+  if (cmd === "uyarilar") {
+    const user = message.mentions?.users?.[0] || message.author;
+    const uyarilar = getUyarilar(message.guildId);
+    const liste = uyarilar[user.id] || [];
+    if (!liste.length) return message.reply(`✅ **${user.username}** uyarısı yok.`);
+    const text = liste.map((w, i) => `**${i+1}.** ${w.sebep} — ${new Date(w.tarih).toLocaleString("tr-TR")}`).join("\n");
+    return message.reply({ embeds: [new EmbedBuilder().setTitle(`⚠️ ${user.username}`).setDescription(text).setColor(Colors.Yellow).setFooter({ text: `${liste.length} uyarı` })] });
+  }
+
+  // UYARI SİL
+  if (cmd === "uyari-sil") {
+    const user = message.mentions?.users?.[0];
+    if (!user) return message.reply("❌ `!uyari-sil @kullanıcı`");
+    const uyarilar = getUyarilar(message.guildId);
+    const eski = (uyarilar[user.id] || []).length;
+    uyarilar[user.id] = [];
+    setUyarilar(message.guildId, uyarilar);
+    message.reply(`✅ **${user.username}** uyarıları silindi! (${eski} uyarı)`);
+    return;
+  }
+
+  // TEMİZLE
+  if (cmd === "temizle") {
+    const sayi = Math.min(parseInt(args[0]) || 10, 100);
+    try {
+      const msgsRes = await fetch(`${API}/guilds/${message.guildId}/channels/${message.channelId}/messages?limit=${sayi}`, {
+        headers: { "Authorization": `Bot ${TOKEN}` }
+      });
+      const data = await msgsRes.json();
+      const msgIds = (data.messages || []).map(m => m.id);
+      if (msgIds.length > 0) {
+        await fetch(`${API}/guilds/${message.guildId}/channels/${message.channelId}/messages/bulk-delete`, {
+          method: "POST",
+          headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: msgIds })
+        });
+      }
+      message.reply(`🗑️ **${msgIds.length}** mesaj silindi!`).then(m => setTimeout(() => m.delete().catch(() => {}), 3000));
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
+
+  // TEMİZLE KULLANICI
+  if (cmd === "temizle-kullanici") {
+    const user = message.mentions?.users?.[0];
+    const sayi = Math.min(parseInt(args[1]) || 10, 100);
+    if (!user) return message.reply("❌ `!temizle-kullanici @üye [sayı]`");
+    try {
+      const msgsRes = await fetch(`${API}/guilds/${message.guildId}/channels/${message.channelId}/messages?limit=100`, {
+        headers: { "Authorization": `Bot ${TOKEN}` }
+      });
+      const data = await msgsRes.json();
+      const msgIds = (data.messages || []).filter(m => String(m.author?.id) === String(user.id)).slice(0, sayi).map(m => m.id);
+      if (msgIds.length > 0) {
+        await fetch(`${API}/guilds/${message.guildId}/channels/${message.channelId}/messages/bulk-delete`, {
+          method: "POST",
+          headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: msgIds })
+        });
+      }
+      message.reply(`🗑️ **${user.username}**'dan **${msgIds.length}** mesaj silindi!`).then(m => setTimeout(() => m.delete().catch(() => {}), 3000));
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
+
+  // DUYURU
+  if (cmd === "duyuru") {
+    const duyuru = args.join(" ");
+    if (!duyuru) return message.reply("❌ `!duyuru <mesaj>`");
+    await message.delete().catch(() => {});
+    await message.reply({ embeds: [new EmbedBuilder().setTitle("📢 DUYURU").setDescription(duyuru).setColor(Colors.Red).setFooter({ text: message.author.username })] });
+    return;
+  }
+
+  // KİLİT
+  if (cmd === "kilit") {
+    try {
+      await fetch(`${API}/channels/${message.channelId}/permissions/${message.guildId}`, {
+        method: "PUT",
+        headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ type: 0, allow: 0, deny: "2048" })
+      });
+      message.reply("🔒 Kanal kilitlendi!");
+      logGonder(message.guildId, `🔒 Kilit: #${message.channel?.name || message.channelId}`);
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
+
+  // KİLİT AÇ
+  if (cmd === "kilitac") {
+    try {
+      await fetch(`${API}/channels/${message.channelId}/permissions/${message.guildId}`, {
+        method: "PUT",
+        headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ type: 0, allow: "2048", deny: 0 })
+      });
+      message.reply("🔓 Kanal açıldı!");
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
+
+  // YAVAŞ MOD
+  if (cmd === "yavasmod") {
+    const saniye = parseInt(args[0]);
+    if (isNaN(saniye) || saniye < 0) return message.reply("❌ `!yavasmod <saniye>`");
+    try {
+      await fetch(`${API}/channels/${message.channelId}`, {
+        method: "PATCH",
+        headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ rate_limit_per_user: saniye })
+      });
+      message.reply(saniye === 0 ? "✅ Yavaş mod kapandı!" : `⏱️ Yavaş mod: ${saniye}s`);
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
+
+  // ENGELLE
+  if (cmd === "engelle") {
+    const userId = args[0]?.replace(/[<@!>]/g, "");
+    if (!userId) return message.reply("❌ `!engelle <ID>`");
+    
+    const engelli = db.engelli.get(message.guildId) || {};
+    if (engelli[userId]) return message.reply("❌ Zaten engelli!");
+    
+    engelli[userId] = { ekleyen: message.author.id, tarih: new Date().toISOString() };
+    db.engelli.set(message.guildId, engelli);
     
     try {
-        const servers = await api.getServers();
-        if (!servers || servers.length === 0) {
-            return ctx.reply('📡 Hiç sunucu bulunamadı.');
-        }
-        
-        const serverList = servers.slice(0, 10).map(s => 
-            `• **${s.name}** (ID: ${s.id})`
-        ).join('\n');
-        
-        ctx.reply(`📡 **Mevcut Sunucular (${servers.length}):**\n${serverList}`);
-    } catch (error) {
-        ctx.reply('❌ Sunucular alınamadı! API tokenını kontrol et.');
-    }
-});
+      await fetch(`${API}/guilds/${message.guildId}/bans/${userId}`, {
+        method: "PUT",
+        headers: { "Authorization": `Bot ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "ID Engelleme" })
+      });
+    } catch (e) {}
+    
+    message.reply(`🚫 \`${userId}\` engellendi!`);
+    logGonder(message.guildId, `🚫 Engelle: ${userId}`);
+    return;
+  }
 
-bot.command('sunucu-oluştur', async (ctx) => {
-    if (!isAdmin(ctx.senderId)) return;
+  // ENGEL KALDIR
+  if (cmd === "engel-kaldir") {
+    const userId = args[0]?.replace(/[<@!>]/g, "");
+    if (!userId) return message.reply("❌ `!engel-kaldir <ID>`");
     
-    const name = ctx.args[0];
-    if (!name) return ctx.reply('❌ Sunucu adı gir! Örnek: `!sunucu-oluştur BenimSunucum`');
+    const engelli = db.engelli.get(message.guildId) || {};
+    if (!engelli[userId]) return message.reply("❌ Listede yok!");
     
-    try {
-        const newServer = await api.createServer(name, 'genel');
-        ctx.reply(`✅ **${name}** sunucusu oluşturuldu!\nID: \`${newServer.id}\``);
-    } catch (error) {
-        ctx.reply('❌ Sunucu oluşturulamadı!');
-    }
-});
-
-bot.command('bot-oluştur', async (ctx) => {
-    if (!isAdmin(ctx.senderId)) return;
-    
-    const botName = ctx.args[0];
-    if (!botName) return ctx.reply('❌ Bot adı gir! Örnek: `!bot-oluştur YardimBot`');
+    delete engelli[userId];
+    db.engelli.set(message.guildId, engelli);
     
     try {
-        const newBot = await api.createBot(botName, '!');
-        ctx.reply(`
-🤖 **Yeni bot oluşturuldu!**
-İsim: ${newBot.name}
-Prefix: ${newBot.prefix}
-Token: \`${newBot.token}\`
-⚠️ **Token'ı güvenli bir yere kaydet!**
-        `);
-    } catch (error) {
-        ctx.reply('❌ Bot oluşturulamadı!');
+      await fetch(`${API}/guilds/${message.guildId}/bans/${userId}`, {
+        method: "DELETE",
+        headers: { "Authorization": `Bot ${TOKEN}` }
+      });
+    } catch (e) {}
+    
+    message.reply(`✅ \`${userId}\` engeli kalktı!`);
+    return;
+  }
+
+  // ENGELLİ LİSTESİ
+  if (cmd === "engelli-list") {
+    const engelli = db.engelli.get(message.guildId) || {};
+    const ids = Object.keys(engelli);
+    if (!ids.length) return message.reply("📭 Liste boş!");
+    const liste = ids.map((id, i) => `**${i+1}.** \`${id}\``).join("\n");
+    return message.reply({ embeds: [new EmbedBuilder().setTitle("🚫 Engelli Liste").setDescription(liste).setColor(Colors.Red).setFooter({ text: `${ids.length} ID` })] });
+  }
+
+  // LOG KANAL
+  if (cmd === "logkanal") {
+    const kanalId = args[0]?.replace(/[<#>]/g, "");
+    if (!kanalId) return message.reply("❌ `!logkanal <ID>`");
+    db.logKanallar.set(message.guildId, kanalId);
+    message.reply(`✅ Log kanalı: ${kanalId}`);
+    return;
+  }
+
+  // LOG KALDIR
+  if (cmd === "logkaldir") {
+    db.logKanallar.delete(message.guildId);
+    message.reply("✅ Log kanalı kaldırıldı!");
+    return;
+  }
+
+  // ROL VER
+  if (cmd === "rol-ver") {
+    const user = message.mentions?.users?.[0];
+    const rolId = args[1]?.replace(/[<@&>]/g, "");
+    if (!user || !rolId) return message.reply("❌ `!rol-ver @üye @rol`");
+    try {
+      await fetch(`${API}/guilds/${message.guildId}/members/${user.id}/roles/${rolId}`, {
+        method: "PUT",
+        headers: { "Authorization": `Bot ${TOKEN}` }
+      });
+      message.reply(`✅ **${user.username}**'e rol verildi!`);
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
+
+  // ROL AL
+  if (cmd === "rol-al") {
+    const user = message.mentions?.users?.[0];
+    const rolId = args[1]?.replace(/[<@&>]/g, "");
+    if (!user || !rolId) return message.reply("❌ `!rol-al @üye @rol`");
+    try {
+      await fetch(`${API}/guilds/${message.guildId}/members/${user.id}/roles/${rolId}`, {
+        method: "DELETE",
+        headers: { "Authorization": `Bot ${TOKEN}` }
+      });
+      message.reply(`✅ **${user.username}**'den rol alındı!`);
+    } catch (e) { message.reply(`❌ ${e.message}`); }
+    return;
+  }
+
+  // OTOROL
+  if (cmd === "otorol") {
+    const rolId = args[0]?.replace(/[<@&>]/g, "");
+    if (!rolId) return message.reply("❌ `!otorol @rol` veya `!otorol kapat`");
+    if (rolId === "kapat") {
+      db.otorol.delete(message.guildId);
+      return message.reply("✅ Otorol kapatıldı!");
     }
-});
+    db.otorol.set(message.guildId, rolId);
+    message.reply(`✅ Otorol ayarlandı!`);
+    return;
+  }
 
-// ======================= EKSTRA ÖZELLİKLER =======================
-// İstatistik göster
-setInterval(() => {
-    if (bot.ready) {
-        console.log(`📊 İstatistik - Uptime: ${Math.floor(bot.uptime / 1000)}s, Ping: ${bot.ping}ms`);
+  // HOŞGELDİN
+  if (cmd === "hosgeldin") {
+    let kanalId = args[0]?.replace(/[<#>]/g, "");
+    if (!kanalId) return message.reply("❌ `!hosgeldin <ID>` veya `!hosgeldin kapat`");
+    if (kanalId === "kapat") {
+      db.hosgeldin.delete(message.guildId);
+      return message.reply("✅ Kapatıldı!");
     }
-}, 60000); // Her dakika
+    db.hosgeldin.set(message.guildId, kanalId);
+    message.reply(`✅ Hoşgeldin kanalı ayarlandı!`);
+    return;
+  }
 
-// Oda sayısını göster
-bot.on('count', (roomCount) => {
-    console.log(`📡 Aktif oda sayısı: ${roomCount}`);
-});
+}); // messageCreate biter
 
-// Botu başlat
-bot.connect();
+// Hata Yakalama
+client.on("error", (err) => console.error("❌", err.message));
+process.on("unhandledRejection", (err) => console.error("❌", err));
 
-console.log('🚀 Bot başlatılıyor...');
+// Başlat
+console.log("🚀 MODDUX başlatılıyor...");
+client.login(TOKEN);
